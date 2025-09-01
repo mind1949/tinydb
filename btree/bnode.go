@@ -3,7 +3,10 @@ package btree
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 )
+
+var errInvalidBNode = errors.New("invalid b+tree's node type")
 
 // HEADER a fixed-size HEADER
 //
@@ -269,4 +272,26 @@ func nodeSplit3(old BNode) (uint16, [3]BNode) {
 	nodeSplit2(leftleft, middle, left)
 	assert(leftleft.nbytes() <= BTREE_PAGE_SIZE)
 	return 3, [3]BNode{leftleft, middle, right} // 3 nodes
+}
+
+// leafDelete remove a key from a leaf node
+func leafDelete(new BNode, old BNode, idx uint16) {
+	new.setHeader(old.btype(), old.nkeys()-1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendRange(new, old, idx, idx+1, old.nkeys()-idx-1)
+}
+
+// nodeMerge merge 2 nodes into 1
+func nodeMerge(new BNode, left BNode, right BNode) {
+	new.setHeader(left.btype(), left.nkeys()+right.nkeys())
+	nodeAppendRange(new, left, 0, 0, left.nkeys())
+	nodeAppendRange(new, right, left.nkeys(), 0, right.nkeys())
+}
+
+// nodeReplace2Kid replace 2 adjacent links with 1
+func nodeReplace2Kid(new BNode, old BNode, idx uint16, ptr uint64, key []byte) {
+	new.setHeader(BNODE_NODE, old.nkeys())
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendKV(new, idx, ptr, key, nil)
+	nodeAppendRange(new, old, idx+1, idx+1, old.nkeys()-idx-1)
 }
