@@ -7,6 +7,19 @@ import (
 	"fmt"
 )
 
+// NewBTree instantiate a b+tree
+func NewBTree(
+	get func(uint64) []byte, // dereference a pointer
+	new func([]byte) uint64, // alocate a new page
+	del func(uint64), // deallocate a page
+) BTree {
+	return BTree{
+		get: get,
+		new: new,
+		del: del,
+	}
+}
+
 // BTree
 //
 // 3 invariants(to preserve when updating a B+tree):
@@ -21,6 +34,11 @@ type BTree struct {
 	get func(uint64) []byte // dereference a pointer
 	new func([]byte) uint64 // alocate a new page
 	del func(uint64)        // deallocate a page
+}
+
+// GetRoot get root node pointer
+func (t *BTree) GetRoot() uint64 {
+	return t.root
 }
 
 // Insert insert a new key or update an existing key
