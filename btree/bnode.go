@@ -11,8 +11,8 @@ var errInvalidBNode = errors.New("invalid b+tree's node type")
 // HEADER a fixed-size HEADER
 //
 // contains:
-// * The type of node (leaf or internal)
-// * The number of keys
+//  1. The type of node (leaf or internal)
+//  2. The number of keys
 const HEADER = 4
 
 const BTREE_PAGE_SIZE uint16 = 4 * 1024 // euquals to typical OS page size
@@ -37,25 +37,27 @@ func assert(result bool) {
 //
 // a node includes:
 //  1. A fixed-size header, which contains:
-//     * The type of node (leaf or internal).
-//     * The number of keys.
+//    - The type of node (leaf or internal).
+//    - The number of keys.
 //  2. A list of pointers to child nodes for internal nodes.
 //  3. A list of KV pairs.
 //  4. A list of offsets to KVs, which can be used to binary search KVs
 //
-// | type | nkeys |  pointers  |  offsets   | key-values | unused |
-// |  2B  |   2B  | nkeys × 8B | nkeys × 2B |     ...    |        |
+// this is the format of node
+//
+//    | type | nkeys |  pointers  |  offsets   | key-values | unused |
+//    |  2B  |   2B  | nkeys × 8B | nkeys × 2B |     ...    |        |
 //
 // This is the format of each KV pair. Lengths followed by data.
 //
-// | key_size | val_size | key | val |
-// |    2B    |    2B    | ... | ... |
+//    | key_size | val_size | key | val |
+//    |    2B    |    2B    | ... | ... |
 //
 // For example, a leaf node {"k1":"hi", "k3":"hello"} is encoded as:
 //
-// | type | nkeys | pointers | offsets |            key-values           | unused |
-// |   2  |   2   | nil nil  |  8 19   | 2 2 "k1" "hi"  2 5 "k3" "hello" |        |
-// |  2B  |  2B   |   2×8B   |  2×2B   | 4B + 2B + 2B + 4B + 2B + 5B     |        |
+//    | type | nkeys | pointers | offsets |            key-values           | unused |
+//    |   2  |   2   | nil nil  |  8 19   | 2 2 "k1" "hi"  2 5 "k3" "hello" |        |
+//    |  2B  |  2B   |   2×8B   |  2×2B   | 4B + 2B + 2B + 4B + 2B + 5B     |        |
 type BNode []byte // can be dumped to the disk
 
 const (
@@ -135,7 +137,7 @@ func (n BNode) getVal(idx uint16) []byte {
 	return n[pos+2+2+klen:][:vlen]
 }
 
-// bbytes btree-node's size in bytes
+// nbytes btree-node's size in bytes
 func (n BNode) nbytes() uint16 {
 	return n.kvPos(n.nkeys())
 }
@@ -144,9 +146,9 @@ func (n BNode) nbytes() uint16 {
 //
 // params:
 //
-//	idx is the position of the item (a key, a value or a pointer).
-//	ptr is the nth child pointer, which is unused for leaf nodes.
-//	key and val is the KV pair. Use an empty value for internal nodes.
+//	* idx is the position of the item (a key, a value or a pointer).
+//	* ptr is the nth child pointer, which is unused for leaf nodes.
+//	* key and val is the KV pair. Use an empty value for internal nodes.
 //
 // assumes that keys are added in order.
 // It uses the previous value of the offsets array to determine where the KV should be.

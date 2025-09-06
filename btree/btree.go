@@ -1,3 +1,4 @@
+// Pacakge btree copy-on-write B+tree
 package btree
 
 import (
@@ -8,8 +9,7 @@ import (
 
 // BTree
 //
-// 3 invariants:
-// > to preserve when updating a B+tree
+// 3 invariants(to preserve when updating a B+tree):
 //  1. Same height for all leaf nodes.
 //  2. Node size is bounded by a constant.
 //  3. Node is not empty.
@@ -123,7 +123,8 @@ func nodeReplaceKidN(
 	nodeAppendRange(new, old, idx+inc, idx+1, old.nkeys()-(idx+1))
 }
 
-var errKeyNotFound = errors.New("key not found in b+tree")
+// ErrKeyNotFound cann't find key from b+tree
+var ErrKeyNotFound = errors.New("key not found in b+tree")
 
 // Delete delete a key and returns whether the key was there
 func (t *BTree) Delete(key []byte) (bool, error) {
@@ -135,7 +136,7 @@ func (t *BTree) Delete(key []byte) (bool, error) {
 	}
 
 	updated, err := treeDelete(t, t.get(t.root), key)
-	if errors.Is(err, errKeyNotFound) {
+	if errors.Is(err, ErrKeyNotFound) {
 		return false, nil
 	}
 	if err != nil {
@@ -158,7 +159,7 @@ func treeDelete(tree *BTree, node BNode, key []byte) (BNode, error) {
 	switch node.btype() {
 	case BNODE_LEAF: // leaf node
 		if !bytes.Equal(key, node.getKey(idx)) {
-			return BNode{}, errKeyNotFound
+			return BNode{}, ErrKeyNotFound
 		}
 
 		// The extra size allows it to exceed 1 page temporarily.
@@ -233,4 +234,25 @@ func shouldMerge(
 		}
 	}
 	return 0, BNode{}
+}
+
+// Get get value with key
+func (t *BTree) Get(key []byte) ([]byte, error) {
+	if err := checkLimitKey(key); err != nil {
+		return nil, err
+	}
+	if t.root == 0 {
+		return nil, ErrKeyNotFound
+	}
+
+	node := BNode(t.get(t.root))
+	for node.btype() == BNODE_NODE {
+		idx := nodeLookupLE(node, key)
+		node = BNode(t.get(node.getPtr(idx)))
+	}
+	idx := nodeLookupLE(node, key)
+	if idx >= node.nkeys() || !bytes.Equal(key, node.getKey(idx)) {
+		return nil, ErrKeyNotFound
+	}
+	return node.getVal(idx), nil
 }
