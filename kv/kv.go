@@ -2,13 +2,16 @@
 package kv
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"syscall"
 
 	"github.com/mind1949/tinydb/btree"
+	"github.com/mind1949/tinydb/meta"
 	"golang.org/x/sys/unix"
 )
 
@@ -18,21 +21,23 @@ import (
 // Each page is a B+tree node, except for the 1st page;
 // the 1st page contains the pointer to the latest root node and other auxiliary data, we call this the meta page.
 //
-//	|     the_meta_page    | pages... | root_node | pages... | (end_of_file)
-//	| root_ptr | page_used |                ^                ^
-//	      |          |                      |                |
-//	      +----------|----------------------+                |
-//	                 |                                       |
-//	                 +---------------------------------------+
+//	|      the_meta_page         | pages... | root_node | pages... | (end_of_file)
+//	| sig | root_ptr | page_used |                ^                ^
+//	            |          |                      |                |
+//	            +----------|----------------------+                |
+//	                       |                                       |
+//	                       +---------------------------------------+
 //
 // New nodes are simply appended like a log,
 // but we cannot use the file size to count the number of pages,
 // because after a power loss the file size (metadata) may become inconsistent with the file data.
 // This is filesystem dependent, we can avoid this by storing the number of pages in the meta page.
 type KV struct {
-	Path string // filename
+	// filename
+	Path string
+	// filename fd
+	fd int
 
-	fd   int
 	tree btree.BTree
 
 	mmap struct {
@@ -60,32 +65,13 @@ func (k *KV) Open() error {
 		k.pageAppend, // apppend a page
 		func(uint64) {},
 	)
-	// TODO:
-	return nil
-}
-
-// Get get value with key
-func (k *KV) Get(key []byte) ([]byte, error) {
-	return k.tree.Get(key)
-}
-
-// Set set key with val
-func (k *KV) Set(key []byte, val []byte) error {
-	meta := saveMeta(k) // save the in-memory state (tree root)
-	err := k.tree.Insert(key, val)
+	fd, err := createFileSync(k.Path)
 	if err != nil {
 		return err
 	}
-	return updateOrRevert(k, meta)
-}
-
-// Del delete key
-func (k *KV) Del(key []byte) (bool, error) {
-	deleted, err := k.tree.Delete(key)
-	if err != nil {
-		return false, err
-	}
-	return deleted, updateFile(k)
+	k.fd = fd
+	// TODO:
+	return nil
 }
 
 // pageRead `BTree.get`, read a page.
@@ -102,44 +88,13 @@ func (k *KV) pageRead(ptr uint64) []byte {
 	panic("bad ptr")
 }
 
-func updateOrRevert(kv *KV, meta []byte) error {
-	// ensure the on-disk meta page matches the in-memory one after an error
-	if kv.failed {
-		// write and fsync the previous meta page
-		// TODO:
-
-		kv.failed = false
-	}
-	// 2-phase update
-	err := updateFile(kv)
-	// revert on error
-	if err != nil {
-		// the on-disk meta page is in an unknown state;
-		// mark it to be rewritten on later recovery.
-		kv.failed = true
-		// the in-memory states can be reverted immediately to allow reads
-		loadMeta(kv, meta)
-		// discard temporaries
-		kv.page.temp = kv.page.temp[:0]
-	}
-	return err
-}
-
-func updateFile(kv *KV) error {
-	// 1. Write new nodes.
-	if err := writePages(kv); err != nil {
-		return err
-	}
-	// 2. `fsync` to enforce the order between 1 and 3.
-	if err := syscall.Fsync(kv.fd); err != nil {
-		return err
-	}
-	// 3. Update the root pointer atomically.
-	if err := updateRoot(kv); err != nil {
-		return err
-	}
-	// 4. `fsync` to make everything persistent.
-	return syscall.Fsync(kv.fd)
+// pageAppend
+//
+// The BTree.new callback collects new pages from B+tree updates, and allocates the page number from the end of DB.
+func (k *KV) pageAppend(node []byte) uint64 {
+	ptr := k.page.flushed + uint64(len(k.page.temp)) // just append
+	k.page.temp = append(k.page.temp, node)
+	return ptr
 }
 
 func createFileSync(file string) (int, error) {
@@ -168,13 +123,71 @@ func createFileSync(file string) (int, error) {
 	return fd, nil
 }
 
-// pageAppend
-//
-// The BTree.new callback collects new pages from B+tree updates, and allocates the page number from the end of DB.
-func (k *KV) pageAppend(node []byte) uint64 {
-	ptr := k.page.flushed + uint64(len(k.page.temp)) // just append
-	k.page.temp = append(k.page.temp, node)
-	return ptr
+// Get get value with key
+func (k *KV) Get(key []byte) ([]byte, error) {
+	return k.tree.Get(key)
+}
+
+// Set set key with val
+func (k *KV) Set(key []byte, val []byte) error {
+	meta := saveMeta(k) // save the in-memory state (tree root)
+	err := k.tree.Insert(key, val)
+	if err != nil {
+		return err
+	}
+	return updateOrRevert(k, meta)
+}
+
+// Del delete key
+func (k *KV) Del(key []byte) (bool, error) {
+	meta := saveMeta(k) // save the in-memory state (tree root)
+	deleted, err := k.tree.Delete(key)
+	if err != nil {
+		return false, err
+	}
+	return deleted, updateOrRevert(k, meta)
+}
+
+func updateOrRevert(kv *KV, meta []byte) error {
+	// ensure the on-disk meta page matches the in-memory one after an error
+	if kv.failed {
+		// write and fsync the previous meta page
+		// TODO:
+
+		kv.failed = false
+	}
+
+	// 2-phase update
+	err := updateFile(kv)
+	// revert on error
+	if err != nil {
+		// the on-disk meta page is in an unknown state;
+		// mark it to be rewritten on later recovery.
+		kv.failed = true
+		// the in-memory states can be reverted immediately to allow reads
+		loadMeta(kv, meta)
+		// discard temporaries
+		kv.page.temp = kv.page.temp[:0]
+	}
+	return err
+}
+
+func updateFile(kv *KV) error {
+	// 1. Write new nodes.
+	if err := writePages(kv); err != nil {
+		return err
+	}
+	// 2. `fsync` to enforce the order between 1 and 3.
+	if err := syscall.Fsync(kv.fd); err != nil {
+		return err
+	}
+
+	// 3. Update the root pointer atomically.
+	if err := updateRoot(kv); err != nil {
+		return err
+	}
+	// 4. `fsync` to make everything persistent.
+	return syscall.Fsync(kv.fd)
 }
 
 // writePages
@@ -196,6 +209,11 @@ func writePages(kv *KV) error {
 }
 
 // updateRoot Update the meta page. it must be atomic.
+//
+// Writing a small amount of page-aligned data to a real disk,
+// modifying only a single sector, is likely power-loss-atomic at the hardware level.
+// Some [real databases](https://www.postgresql.org/message-id/flat/17064-bb0d7904ef72add3%40postgresql.org) depend on this.
+// That’s how we update the meta page too.
 func updateRoot(kv *KV) error {
 	if _, err := syscall.Pwrite(kv.fd, saveMeta(kv), 0); err != nil {
 		return fmt.Errorf("write meta page: %w", err)
@@ -203,10 +221,12 @@ func updateRoot(kv *KV) error {
 	return nil
 }
 
+// extendMmap
 func extendMmap(kv *KV, size int) error {
 	if size <= kv.mmap.total {
 		return nil // enough range
 	}
+
 	alloc := max(kv.mmap.total, 64<<20) // double the current address space
 	for kv.mmap.total+alloc < size {
 		alloc *= 2 // still not enough?
@@ -223,19 +243,52 @@ func extendMmap(kv *KV, size int) error {
 	return nil
 }
 
-const DB_SIG = "BuildYourOwnDB"
+const metaSig = meta.NAME + " format " + meta.VERSION
 
+const (
+	meta_SIG_SIZE        = 16
+	meta_ROOT_PTR_SIZE   = 8
+	meta_PAGE_USERD_SIZE = 8
+)
+
+// saveMeta
+//
 // | sig | root_ptr | page_used |
 // | 16B |    8B    |     8B    |
 func saveMeta(kv *KV) []byte {
 	var data [32]byte
-	copy(data[:16], []byte(DB_SIG))
-	binary.LittleEndian.PutUint64(data[16:], kv.tree.GetRoot())
-	binary.LittleEndian.PutUint64(data[24:], kv.page.flushed)
+	copy(data[:meta_SIG_SIZE], []byte(metaSig))
+	binary.LittleEndian.PutUint64(data[meta_SIG_SIZE:], kv.tree.GetRoot())
+	binary.LittleEndian.PutUint64(data[meta_SIG_SIZE+meta_ROOT_PTR_SIZE:], kv.page.flushed)
 	return data[:]
 }
 
+// loadMeta
 func loadMeta(kv *KV, data []byte) error {
-	// TODO:
+	if err := checkMeta(data); err != nil {
+		return err
+	}
+
+	root := binary.LittleEndian.Uint64(data[meta_SIG_SIZE:])
+	kv.tree.SetRoot(root)
+	flushed := binary.LittleEndian.Uint64(data[meta_SIG_SIZE+meta_ROOT_PTR_SIZE:])
+	kv.page.flushed = flushed
+	return nil
+}
+
+func checkMeta(data []byte) error {
+	if len(data) < meta_SIG_SIZE+meta_ROOT_PTR_SIZE+meta_PAGE_USERD_SIZE {
+		return errors.New("invalid meta length")
+	}
+	if err := checkMetaSig(data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkMetaSig(data []byte) error {
+	if len(data) < meta_SIG_SIZE || !bytes.Equal(data[:meta_SIG_SIZE], []byte(metaSig)) {
+		return errors.New("invalid meta sig")
+	}
 	return nil
 }
